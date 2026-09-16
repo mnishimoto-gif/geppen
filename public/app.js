@@ -21,16 +21,29 @@ function statusPill(status) {
   return `<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${cls}">${label}</span>`;
 }
 
-async function apiGet(path) {
-  const res = await fetch(path);
-  if (!res.ok) throw new Error(`API error ${res.status}: ${await res.text()}`);
-  return res.json();
+function scriptUrl() {
+  if (!window.APPS_SCRIPT_URL) {
+    throw new Error("config.js に Google Apps Script の URL が設定されていません。");
+  }
+  return window.APPS_SCRIPT_URL;
 }
 
-async function apiPut(path, body) {
-  const res = await fetch(path, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(`API error ${res.status}: ${await res.text()}`);
-  return res.json();
+async function apiGet(route, params) {
+  const url = new URL(scriptUrl());
+  url.searchParams.set("route", route);
+  for (const [k, v] of Object.entries(params ?? {})) url.searchParams.set(k, v);
+  const res = await fetch(url.toString());
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+// Content-Typeを明示的に指定しない(text/plainになる)ことで、ブラウザのCORSプリフライトを避ける。
+async function apiPost(body) {
+  const res = await fetch(scriptUrl(), { method: "POST", body: JSON.stringify(body) });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data;
 }
 
 // ---- タブ切り替え ----
@@ -63,7 +76,7 @@ document.getElementById("tabs").addEventListener("click", (e) => {
 async function renderDashboard() {
   const el = document.getElementById("view-dashboard");
   el.innerHTML = `<p class="text-on-surface-variant">読み込み中...</p>`;
-  const data = await apiGet("/api/dashboard");
+  const data = await apiGet("dashboard");
 
   const alertsHtml =
     data.alerts.length === 0
@@ -112,11 +125,11 @@ async function renderDashboard() {
 // ---- CSV取込 ----
 async function renderUpload() {
   const el = document.getElementById("view-upload");
-  const employees = await apiGet("/api/employees");
+  const employees = await apiGet("employees");
 
   const monthSet = new Set();
   for (const emp of employees) {
-    const detail = await apiGet(`/api/employees/${emp.id}`);
+    const detail = await apiGet("employee", { id: emp.id });
     detail.history.forEach((h) => monthSet.add(h.month));
   }
   const months = [...monthSet].sort();
@@ -152,14 +165,11 @@ async function renderUpload() {
       messageEl.className = "mt-4 text-sm text-applicable";
       return;
     }
-    const formData = new FormData();
-    formData.append("csv", fileInput.files[0]);
     messageEl.textContent = "取込中...";
     messageEl.className = "mt-4 text-sm text-on-surface-variant";
     try {
-      const res = await fetch("/api/payroll/upload", { method: "POST", body: formData });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "取込に失敗しました");
+      const csvText = await fileInput.files[0].text();
+      const data = await apiPost({ route: "upload_payroll", csvText });
       const applicableCount = data.judgmentSummary.filter((s) => s.status === "applicable").length;
       messageEl.textContent = `取込完了: ${data.importedMonths.join(", ")} 分を取り込みました。該当者${applicableCount}名です。`;
       messageEl.className = "mt-4 text-sm text-not-applicable";
@@ -174,11 +184,11 @@ async function renderUpload() {
 // ---- 対象者一覧 ----
 async function renderEmployeesList() {
   const el = document.getElementById("view-employees");
-  const employees = await apiGet("/api/employees");
+  const employees = await apiGet("employees");
 
   el.innerHTML = `
     <h2 class="text-lg font-bold mb-4">対象者一覧</h2>
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
       ${employees
         .map(
           (e) => `
@@ -191,7 +201,19 @@ async function renderEmployeesList() {
         </button>`
         )
         .join("")}
+      ${employees.length === 0 ? `<p class="text-sm text-on-surface-variant">まだ対象者が登録されていません。下のフォームから登録してください。</p>` : ""}
     </div>
+    <details class="bg-surface border border-surface-border rounded-xl p-4">
+      <summary class="text-sm font-bold cursor-pointer">対象者を登録・編集する</summary>
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4">
+        <input id="emp-id" type="text" placeholder="対象者ID(例: emp1)" class="border border-surface-border rounded-lg px-3 py-2 text-sm" />
+        <input id="emp-name" type="text" placeholder="氏名" class="border border-surface-border rounded-lg px-3 py-2 text-sm" />
+        <input id="emp-amount" type="number" placeholder="現行の標準報酬月額(円)" class="border border-surface-border rounded-lg px-3 py-2 text-sm" />
+        <button id="emp-save" class="bg-primary text-white text-sm font-semibold rounded-lg px-3 py-2">登録・更新</button>
+      </div>
+      <p class="text-xs text-on-surface-variant mt-2">既存の対象者IDを入力すると内容が上書きされます。等級はGradeTableから自動算出されます。</p>
+      <div id="emp-message" class="mt-2 text-sm"></div>
+    </details>
   `;
 
   el.querySelectorAll(".employee-card").forEach((card) =>
@@ -201,12 +223,33 @@ async function renderEmployeesList() {
       renderEmployeeDetail(currentEmployeeId);
     })
   );
+
+  document.getElementById("emp-save").addEventListener("click", async () => {
+    const id = document.getElementById("emp-id").value.trim();
+    const name = document.getElementById("emp-name").value.trim();
+    const amount = Number(document.getElementById("emp-amount").value);
+    const messageEl = document.getElementById("emp-message");
+    if (!id || !name || !amount) {
+      messageEl.textContent = "対象者ID・氏名・標準報酬月額をすべて入力してください。";
+      messageEl.className = "mt-2 text-sm text-applicable";
+      return;
+    }
+    try {
+      await apiPost({ route: "update_employee", id, name, currentStandardAmount: amount });
+      messageEl.textContent = `${name} を登録しました。`;
+      messageEl.className = "mt-2 text-sm text-not-applicable";
+      renderEmployeesList();
+    } catch (err) {
+      messageEl.textContent = err.message;
+      messageEl.className = "mt-2 text-sm text-applicable";
+    }
+  });
 }
 
 // ---- 対象者詳細 ----
 async function renderEmployeeDetail(id) {
   const el = document.getElementById("view-employee-detail");
-  const data = await apiGet(`/api/employees/${id}`);
+  const data = await apiGet("employee", { id });
   const { employee, history, judgment } = data;
 
   const maxFixed = Math.max(1, ...history.map((h) => h.fixedTotal));
@@ -278,7 +321,7 @@ async function renderEmployeeDetail(id) {
 // ---- 判定結果一覧 ----
 async function renderResults() {
   const el = document.getElementById("view-results");
-  const judgments = await apiGet("/api/judgments");
+  const judgments = await apiGet("judgments");
 
   el.innerHTML = `
     <h2 class="text-lg font-bold mb-4">随時改定 判定結果一覧</h2>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { fixedTotal, totalPay, detectChangeMonthIndex, judge } from "../functions/lib/judgment";
-import { GRADE_TABLE, findGrade } from "../functions/lib/gradeTable";
-import type { PayrollRecord } from "../functions/lib/types";
+import { fixedTotal, totalPay, detectChangeMonthIndex, judge } from "../logic/judgment";
+import { GRADE_TABLE, findGrade } from "../logic/gradeTable";
+import type { PayrollRecord } from "../logic/types";
 
 function rec(month: string, base: number, role = 0, skill = 0, housing = 0, overtime = 0, commuting = 0): PayrollRecord {
   return { month, base, roleAllowance: role, skillAllowance: skill, housingAllowance: housing, overtime, commuting };
